@@ -1,0 +1,511 @@
+# ============================================================
+# SV08 Validated Sensorless Homing
+# Standalone file — place outside ktc-easy readonly folder
+# and include AFTER ktc-easy in printer.cfg:
+#   [include ktc-easy/...]
+#   [include sv08_homing.cfg]   <-- must come after
+#
+# Overrides: homing_override_config, [homing_override], _SENSORLESS_HOME
+# Adds:      _VALIDATED_HOME, _TEST_ENDSTOP, _HOMED_CHECK
+# Retained:  _ADJUST_Z_HOME_FOR_TOOL_OFFSET, TOOL_BED_MESH_CALIBRATE
+# ============================================================
+
+[gcode_macro homing_override_config]
+variable_sensorless_x: True
+variable_sensorless_y: True
+variable_homing_rebound_y: 65
+variable_stepper_driver: "tmc2209"
+variable_homing_current: 0.71
+gcode:
+
+
+[homing_override]
+axes: xyz
+gcode:
+
+  {% set uses_tool_probe = printer["tool_probe_endstop"] is defined %}
+
+  INITIALIZE_TOOLCHANGER
+
+  {% if uses_tool_probe and printer.probe.last_query %}
+    RESPOND TYPE=error MSG='Z Probe triggered, cannot home.'
+  {% else %}
+    ENTER_DOCKING_MODE
+    SET_GCODE_OFFSET X=0.0 Y=0.0 Z=0.0
+    {% set max_y = printer.configfile.config["stepper_y"]["position_max"]|float %}
+    {% set max_x = printer.configfile.config["stepper_x"]["position_max"]|float %}
+    {% set home_all = 'X' not in params and 'Y' not in params and 'Z' not in params %}
+    {% set config = printer["gcode_macro homing_override_config"] %}
+
+    G90
+    {% if 'z' not in printer.toolhead.homed_axes %}
+      SET_KINEMATIC_POSITION Z=0
+      G0 Z10 F1000
+    {% elif printer.toolhead.position[2]|float < 10 %}
+      G0 Z10 F1000
+    {% endif %}
+
+    {% if home_all or 'Y' in params or 'X' in params %}
+      {% set position_endstop_y = printer.configfile.config["stepper_y"]["position_endstop"]|float %}
+      {% if config.sensorless_y %}
+        SET_GCODE_VARIABLE MACRO=_HOMED_CHECK VARIABLE=homingfailed VALUE=False
+        _SENSORLESS_HOME AXIS=Y
+        # First retry if needed
+        _HOMED_CHECK AXIS=Y
+        # Second check — if retry also failed, halt
+        _HOMED_CHECK_FINAL AXIS=Y
+      {% else %}
+        G28 Y
+      {% endif %}
+      G0 Y{position_endstop_y - config.homing_rebound_y} F6000
+    {% endif %}
+
+    {% if home_all or 'X' in params %}
+      {% set position_endstop_x = printer.configfile.config["stepper_x"]["position_endstop"]|float %}
+      {% if config.sensorless_x %}
+        SET_GCODE_VARIABLE MACRO=_HOMED_CHECK VARIABLE=homingfailed VALUE=False
+        _SENSORLESS_HOME AXIS=X
+        # First retry if needed
+        _HOMED_CHECK AXIS=X
+        # Second check — if retry also failed, halt
+        _HOMED_CHECK_FINAL AXIS=X
+      {% else %}
+        G28 X
+      {% endif %}
+      G0 X{position_endstop_x - 10} F6000
+    {% endif %}
+
+    EXIT_DOCKING_MODE
+
+    {% if home_all or 'Z' in params %}
+      {% set random_x = (range(-50, 50) | random) / 10 %}
+      {% set random_y = (range(-50, 50) | random) / 10 %}
+
+      G90
+      G0 X{(max_x / 2) + random_x} Y{(max_y / 2) + random_y} F12000
+      G28 Z
+
+      {% if uses_tool_probe %}
+        _ADJUST_Z_HOME_FOR_TOOL_OFFSET
+      {% endif %}
+
+      G0 Z10 F1000
+    {% endif %}
+    M400
+  {% endif %}
+
+
+[gcode_macro _SENSORLESS_HOME]
+gcode:
+  {% set axis = params.AXIS|default('X')|string|upper %}
+  {% set config = printer["gcode_macro homing_override_config"] %}
+
+  # Read live current from autotune if available, else fall back to configfile
+  {% if 'autotune_tmc stepper_x' in printer %}
+    {% set RUN_CURRENT_X = printer['autotune_tmc stepper_x'].run_current|float %}
+  {% else %}
+    {% set RUN_CURRENT_X = printer.configfile.settings[config.stepper_driver ~ ' stepper_x'].run_current|float %}
+  {% endif %}
+  {% if 'autotune_tmc stepper_y' in printer %}
+    {% set RUN_CURRENT_Y = printer['autotune_tmc stepper_y'].run_current|float %}
+  {% else %}
+    {% set RUN_CURRENT_Y = printer.configfile.settings[config.stepper_driver ~ ' stepper_y'].run_current|float %}
+  {% endif %}
+
+  SET_TMC_CURRENT STEPPER=stepper_x CURRENT={config.homing_current}
+  SET_TMC_CURRENT STEPPER=stepper_y CURRENT={config.homing_current}
+
+  # Handle dual-motor configs (x1/y1) if present
+  {% if config.stepper_driver ~ ' stepper_x1' in printer.configfile.settings %}
+    {% set RUN_CURRENT_X1 = printer.configfile.settings[config.stepper_driver ~ ' stepper_x1'].run_current|float %}
+    SET_TMC_CURRENT STEPPER=stepper_x1 CURRENT=0.1
+  {% endif %}
+  {% if config.stepper_driver ~ ' stepper_y1' in printer.configfile.settings %}
+    {% set RUN_CURRENT_Y1 = printer.configfile.settings[config.stepper_driver ~ ' stepper_y1'].run_current|float %}
+    SET_TMC_CURRENT STEPPER=stepper_y1 CURRENT=0.1
+  {% endif %}
+
+  M400
+
+  # Home with validation instead of bare G28
+  _VALIDATED_HOME AXIS={axis}
+
+  G4 P1000
+
+  # Restore run currents
+  SET_TMC_CURRENT STEPPER=stepper_x CURRENT={RUN_CURRENT_X}
+  SET_TMC_CURRENT STEPPER=stepper_y CURRENT={RUN_CURRENT_Y}
+  {% if config.stepper_driver ~ ' stepper_x1' in printer.configfile.settings %}
+    SET_TMC_CURRENT STEPPER=stepper_x1 CURRENT={RUN_CURRENT_X1}
+  {% endif %}
+  {% if config.stepper_driver ~ ' stepper_y1' in printer.configfile.settings %}
+    SET_TMC_CURRENT STEPPER=stepper_y1 CURRENT={RUN_CURRENT_Y1}
+  {% endif %}
+
+
+# ============================================================
+# Validated homing core — checks minimum travel to endstop
+# and flags for rehome if the toolhead was already too close
+# ============================================================
+
+[gcode_macro _VALIDATED_HOME]
+description: Homes axis and validates minimum travel distance to endstop.
+variable_cache: {}
+variable_min_dist: 60.0  # mm — increase if false positives, decrease if bed is small
+gcode:
+  {% set axis = params.get('AXIS', '')|upper %}
+
+  {% if axis not in ['X', 'Y'] %}
+    { action_respond_info("AXIS must be X or Y") }
+  {% else %}
+    {% set step_name = 'stepper_' ~ axis|lower %}
+    SET_GCODE_VARIABLE MACRO=_VALIDATED_HOME VARIABLE=cache VALUE="{ { 'name': step_name, 'l': [] } }"
+
+    _TEST_ENDSTOP MEASURE={axis}
+    G28 {axis}
+    _TEST_ENDSTOP MEASURE={axis}
+    _TEST_ENDSTOP VALIDATE={axis}
+  {% endif %}
+
+
+[gcode_macro _TEST_ENDSTOP]
+gcode:
+  {% set cache = printer['gcode_macro _VALIDATED_HOME'].cache %}
+  {% if 'MEASURE' in params %}
+    {% set kin = printer.printer.lookup_object('toolhead').get_kinematics() %}
+    {% set ns  = namespace(stepper_obj=None) %}
+    {% for s in kin.get_steppers() if s.get_name() == cache.name and not ns.stepper_obj %}
+      {% set ns.stepper_obj = s %}
+    {% endfor %}
+    {% set _ = cache.l.append(ns.stepper_obj.get_mcu_position()) %}
+    SET_GCODE_VARIABLE MACRO=_VALIDATED_HOME VARIABLE=cache VALUE="{ cache }"
+  {% elif 'VALIDATE' in params %}
+    {% set axis = params.get('VALIDATE', '')|upper %}
+    {% set n    = cache.l|length %}
+    {% if n < 2 %}
+      { action_respond_info("Not enough samples — got %d, need at least 2." % n) }
+    {% else %}
+      {% set cfg           = printer.configfile.settings[cache.name] %}
+      {% set steps_per_rev = cfg.full_steps_per_rotation|float * cfg.microsteps|float %}
+      {% set step_dist     = cfg.rotation_distance|float / steps_per_rev %}
+      {% set range_s       = cache.l|max - cache.l|min %}
+      {% set range_mm      = range_s * step_dist %}
+      {% set min_dist      = printer['gcode_macro _VALIDATED_HOME'].min_dist %}
+
+      { action_respond_info("%s-axis movement before hitting endstop: %.2fmm" % (axis, range_mm)) }
+
+      {% if range_mm|int < min_dist|int %}
+        { action_respond_info("Too close to endstop! Will rehome.") }
+        SET_GCODE_VARIABLE MACRO=_HOMED_CHECK VARIABLE=homingfailed VALUE=True
+      {% endif %}
+    {% endif %}
+  {% endif %}
+
+
+[gcode_macro _HOMED_CHECK]
+variable_homingfailed: False
+gcode:
+  # Runs after first home attempt. If failed, moves away and retries once.
+  # Use _HOMED_CHECK_FINAL afterward to catch a second failure.
+  {% set axis = params.AXIS|default('X')|string|upper %}
+  {% if homingfailed == True %}
+    { action_respond_info("Rehoming %s — moving away from endstop first." % axis) }
+    {% set max_x = printer.configfile.config["stepper_x"]["position_max"]|float %}
+    {% set max_y = printer.configfile.config["stepper_y"]["position_max"]|float %}
+    G90
+    {% if axis == 'X' %}
+      G0 X{max_x - 80} F6000
+    {% else %}
+      G0 Y{max_y - 80} F6000
+    {% endif %}
+    M400
+    SET_GCODE_VARIABLE MACRO=_HOMED_CHECK VARIABLE=homingfailed VALUE=False
+    _SENSORLESS_HOME AXIS={axis}
+  {% endif %}
+
+
+# Called immediately after _HOMED_CHECK.
+# Reads homingfailed AFTER the retry macro has set it — this works because
+# it's a separate macro call evaluated in a new gcode context.
+[gcode_macro _HOMED_CHECK_FINAL]
+gcode:
+  {% set axis = params.AXIS|default('X')|string|upper %}
+  {% if printer['gcode_macro _HOMED_CHECK'].homingfailed == True %}
+    { action_raise_error("Homing failed twice on %s — check SGTHRS tuning." % axis) }
+  {% endif %}
+
+
+
+# ============================================================
+# Retained from ktc-easy — no changes needed here
+# ============================================================
+
+[gcode_macro _ADJUST_Z_HOME_FOR_TOOL_OFFSET]
+gcode:
+  G90
+  G0 Z10 F1000
+  {% set tool = printer.toolchanger.tool %}
+  {% if tool %}
+    {% set tool_z_offset   = printer[tool].gcode_z_offset %}
+    {% set probe_z_offset  = printer.tool_probe_endstop.active_tool_probe_z_offset %}
+    SET_KINEMATIC_POSITION Z={10.0 + tool_z_offset|float + probe_z_offset|float}
+  {% endif %}
+
+
+[gcode_macro TOOL_BED_MESH_CALIBRATE]
+gcode:
+  {% set tool_z_offset = printer[printer.toolchanger.tool].gcode_z_offset %}
+  G90
+  G0 Z10 F1000
+  SET_KINEMATIC_POSITION Z={10.0 - tool_z_offset|float}
+  BED_MESH_CALIBRATE
+  G0 Z10 F1000
+  SET_KINEMATIC_POSITION Z={10.0 + tool_z_offset|float}
+  
+  
+  
+# [gcode_macro homing_override_config]
+# variable_sensorless_x: True
+# variable_sensorless_y: True
+# variable_homing_rebound_y: 60
+# variable_stepper_driver: "tmc2209"
+# variable_homing_current: 0.61
+
+[gcode_macro SET_TEMPERATURE_WITH_DEADBAND]
+variable_default_deadband: 5.0
+
+
+[rounded_path]
+resolution: 0.2
+replace_g0: False
+
+[force_move]
+enable_force_move: True
+
+[toolchanger]
+params_dropoff_path: [{'y':60, 'z':3, 'f':1.0}, {'y':0, 'z':3, 'f':1.0}, {'z':0, 'y':0, 'f':1.0}, {'z':-9, 'y':0}, {'z':-9, 'y':60}]
+params_pickup_path: [{'z':-9, 'y':60, 'f':1.0}, {'z':-9, 'y':0}, {'z':0, 'y':0, 'f':1.0}, {'y':0, 'z':4, 'f':1.0, 'verify':1}, {'y':56, 'z':4,}]
+params_safe_y: 130
+params_close_y: 60
+params_fast_speed: 20000
+params_path_speed: 8000
+require_tool_present: False
+
+
+error_gcode:
+    RESPOND TYPE=error MSG="Tool drop detected Pausing print1111."
+    PAUSE  
+    
+
+
+    
+before_change_gcode:
+    TDD_STOP
+    {% set tn = "T"+(tool.tool_number|string) %}
+    {% if printer["gcode_macro " + tn ] %}
+       SET_GCODE_VARIABLE MACRO={tn} VARIABLE=color VALUE="''"
+    {% endif %}
+
+
+after_change_gcode:
+    {% set tn = "T"+(tool.tool_number|string) %}
+    {% if printer["gcode_macro " + tn ] %}
+       SET_GCODE_VARIABLE MACRO={tn} VARIABLE=color VALUE="'c44'"
+    {% endif %}
+    {% if 'input_shaper' in printer.configfile.config %}
+      {% set default_x_freq = printer.configfile.config['input_shaper']['shaper_freq_x']|default(0)|float %}
+      {% set default_x_type = printer.configfile.config['input_shaper']['shaper_type_x']|default('mzv')|string %}
+      {% set default_x_damping = printer.configfile.config['input_shaper']['damping_ratio_x']|default(0.1)|float %}
+      {% set default_y_freq = printer.configfile.config['input_shaper']['shaper_freq_y']|default(0)|float %}
+      {% set default_y_type = printer.configfile.config['input_shaper']['shaper_type_y']|default('mzv')|string %}
+      {% set default_y_damping = printer.configfile.config['input_shaper']['damping_ratio_y']|default(0.1)|float %}
+      SET_INPUT_SHAPER SHAPER_TYPE_X={tool.params_input_shaper_type_x if tool.params_input_shaper_type_x else default_x_type} SHAPER_FREQ_X={tool.params_input_shaper_freq_x if tool.params_input_shaper_freq_x else default_x_freq} SHAPER_TYPE_Y={tool.params_input_shaper_type_y if tool.params_input_shaper_type_y else default_y_type} SHAPER_FREQ_Y={tool.params_input_shaper_freq_y if tool.params_input_shaper_freq_y else default_y_freq} DAMPING_RATIO_X={tool.params_input_shaper_damping_ratio_x if tool.params_input_shaper_damping_ratio_x else default_x_damping} DAMPING_RATIO_Y={tool.params_input_shaper_damping_ratio_y if tool.params_input_shaper_damping_ratio_y else default_y_damping}
+    {% endif %}
+    TDD_POLLING_RESET
+    TDD_START
+    {% if printer.idle_timeout.state == "Printing" %}
+      CLEAN_NOZZLE PURGE=0 WIPE=8
+    {% endif %}
+    
+
+
+
+    
+#============================================================================
+#DROPOFF SEQUENCE
+#============================================================================
+dropoff_gcode:
+    {% set x = tool.params_park_x|float %}
+    {% set y = tool.params_park_y|float %}
+    {% set z = tool.params_park_z|float %}
+    {% set fast = tool.params_fast_speed|float %}
+    {% set path = tool.params_dropoff_path %}
+    {% set max_z = printer.configfile.config["stepper_z"]["position_max"]|float %}
+    {% set cur_z = printer.toolhead.position[2]|float %}
+    
+    RESPOND TYPE=echo MSG='Dropping off {tool.name}'
+    G90
+
+    # 1. Small hop to clear the current print layer
+    G0 Z{ [cur_z+1.0, max_z]|min } F{fast}
+
+
+    # 2. Move to Y350 (The back of the printer)
+    ROUNDED_G0 Y=350 F={fast} D=20
+
+    # 3. Line up with the Dock X and Dock Z while still at Y350
+    ROUNDED_G0 X={x} Z={z + path[0]['z']|float} F={fast} D=20
+
+    # 4. Move forward to Safe Y (Ready to enter the dock)
+    ROUNDED_G0 Y={tool.params_safe_y} D=20 F={fast}
+    
+    # 5. Final approach to the contact point
+    ROUNDED_G0 Y={y + path[0]['y']|float} D=0 F={fast}
+    STOP_CRASH_DETECTION
+    
+    # Run the unlatching path
+    {% for pos in path %}
+      {% set speed = tool.params_path_speed|float * (pos.get('f', 1.0)|float) %}
+      G0 {% if 'x' in pos %}X{x + pos['x']|float}{% endif %} {% if 'y' in pos %}Y{y + pos['y']|float}{% endif %} {% if 'z' in pos %}Z{z + pos['z']|float }{% endif %} F{speed}
+    {% endfor %}
+
+    ## Return to safe Y if no pickup_tool
+     {% if dropoff_tool is none %}
+      G0 Y{tool.params_safe_y} F{fast}
+      
+    {% endif %}
+
+  
+    
+    
+
+    
+    
+  #============================================================================
+  #PICKUP SEQUENCE
+  #============================================================================
+pickup_gcode:
+    {% set x = tool.params_park_x|float %}
+    {% set y = tool.params_park_y|float %}
+    {% set z = tool.params_park_z|float %}
+    {% set fast = tool.params_fast_speed|float %}
+    {% set path = tool.params_pickup_path %}
+    
+    RESPOND TYPE=echo MSG='Picking up {tool.name}'
+    G90
+    
+    # Fast to the last point
+    ROUNDED_G0 Y={tool.params_close_y} F={fast} D=5
+    ROUNDED_G0 X={x} Z={z + path[0]['z']|float} F={fast} D=5
+    ROUNDED_G0 Y={y + path[0]['y']|float} F={fast} D=0
+    
+    # Wait for temp
+    {% if tool.extruder %}
+      M109 T{tool.tool_number} S{printer[tool.extruder].target|int}
+    {% endif %}
+    
+    # Run the physical pickup path
+    {% for pos in path %}
+      {% set speed = tool.params_path_speed|float * (pos.get('f', 1.0)|float) %}
+      G0 {% if 'x' in pos %}X{x + pos['x']|float}{% endif %} {% if 'y' in pos %}Y{y + pos['y']|float}{% endif %} {% if 'z' in pos %}Z{z + pos['z']|float }{% endif %} F{speed}
+      {% if 'verify' in pos %}
+        VERIFY_TOOL_DETECTED T={tool.tool_number}
+      {% endif %}
+    {% endfor %}
+    
+    # 1. Pull out of dock to Safe Y
+    #ROUNDED_G0 Y={tool.params_safe_y} F={fast} D=20
+    
+    # 2. Move to the back wall waypoint
+    ROUNDED_G0 Y=350 F={fast} D=20 
+    
+    # 3. Restore Z height while still at the back (Y350)
+    {% if 'Z' in restore_position %}
+      ROUNDED_G0 Z={restore_position.Z+5} F={fast} D=150
+    {% endif %}
+    
+    # 4. Restore X/Y position from the back
+    {% if 'X' in restore_position %}
+      ROUNDED_G0 X={restore_position.X} F={fast} D=1000
+    {% endif %}
+    {% if 'Y' in restore_position %}
+      ROUNDED_G0 Y={restore_position.Y} F={fast} D=0
+    {% endif %}
+    
+    # 5. Reset the rounding logic so the next print move isn't rounded
+    ROUNDED_G0 D=0
+    
+    # 6. Enable crash detection now that tool is confirmed picked up
+    
+    START_CRASH_DETECTION
+
+    
+
+
+
+
+# # THIS IS NOT AN EXHAUSTIVE LIST!
+# # use this file to override values in the other configs. 
+# # any value that is available in the configs can be overriden here
+# # just add the section ie: [tool_probe T0] and the value that is being overridden.  
+
+# # this file must be the last file to be included since values will be stored in the order they are
+# # received.  Klipper will take the last value and store that for the macros. 
+
+# [rounded_path]
+# resolution: 0.2 # the length of a circle approximation segments.
+# replace_g0: False # Use at your own risk
+
+# [force_move]
+# enable_force_move: True
+
+# [toolchanger]
+# params_dropoff_path: [{'y':70, 'z':3, 'f':1.0}, {'y':0, 'z':3, 'f':0.8}, {'z':0, 'y':0, 'f':0.8}, {'z':-9, 'y':0}, {'z':-9, 'y':70}]
+# params_pickup_path: [{'z':-9, 'y':70, 'f':1.0}, {'z':-9, 'y':0}, {'z':0, 'y':0, 'f':0.8}, {'y':0, 'z':4, 'f':0.8, 'verify':1}, {'y':56, 'z':4,}]
+# params_safe_y: 130
+# params_close_y: 70
+# params_fast_speed: 20000 # Go as fast as we can
+# params_path_speed: 4000 # 20mm/s for the actual change
+# require_tool_present: True # can set to False if using Beacon/Cartographer/Eddy for Z probe.
+
+# # this section must be completed
+# [gcode_macro homing_override_config]
+# variable_sensorless_x: False
+# variable_sensorless_y: False
+# variable_homing_rebound_y: 0 # for sensorless you probably want this set to 20.
+# variable_stepper_driver: "tmc2209"
+# variable_homing_current: 0.61
+
+# # M109 macro is overridden to allow some deadband on the temp
+# # default is +- 1 degree.  So if the set temp is 250 the the default
+# # deadband will be 249-251.  You can adjust this here:
+
+# [gcode_macro SET_TEMPERATURE_WITH_DEADBAND]
+# variable_default_deadband: 4.0
+
+#these values need to be set to match the location of your Calibration Switch
+# [gcode_macro _CALIBRATION_SWITCH]
+# variable_x: 285
+# variable_y: 346
+# variable_z: 2.00
+# gcode:
+
+# [tools_calibrate]
+# pin: ^PE12  #pin that your calibration probe is connected to.
+# travel_speed: 20  # mms to travel sideways for XY probing
+# spread: 7  # mms to travel down from top for XY probing
+# lower_z: 1.0  # The speed (in mm/sec) to move tools down onto the probe
+# speed: 2  # The speed (in mm/sec) to retract between probes
+# lift_speed: 4  # Z Lift after probing done, should be greater than any Z variance between tools
+# final_lift_z: 6 
+# sample_retract_dist:2
+# samples_tolerance:0.05
+# samples:5
+# samples_result: median # median, average
+# #Settings for nozzle probe calibration - optional.
+# probe: probe # name of the nozzle probe to use
+# trigger_to_bottom_z: 0.600 # Offset from probe trigger to vertical motion bottoms out. 
+# #decrease if the nozzle is too high, increase if too low.
+
+
+
