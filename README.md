@@ -2,7 +2,7 @@
 
 > **Status:** Active Development | **Last Updated:** June 2026
 
-A fully custom multi-tool conversion of the Sovol SV08, replacing the stock StealthChanger toolhead system with four independent **Dragon Burner** toolheads, each running **Sherpa Mini** extruders and **Bambu Lab clone** hot ends. Toolheads are managed via **EBB36 v1.2** CAN boards, bridged through a **Hexa Distro Fusion** board at the rear of the printer.
+A fully custom multi-tool StealthChanger conversion of the Sovol SV08, replacing the stock toolhead system with four independent **Dragon Burner** toolheads, each running **Sherpa Mini** extruders and **Bambu Lab clone** hot ends. Toolheads are managed via **EBB36 v1.2** CAN boards, bridged through a **Hexa Distro Fusion** board at the rear of the printer.
 
 ---
 
