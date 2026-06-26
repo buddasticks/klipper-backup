@@ -187,11 +187,3 @@ spoolman_url: http://192.168.88.135:7912/
 # origin: https://github.com/Staubgeborener/klipper-backup.git
 # managed_services: moonraker
 # primary_branch: main
-
-[update_manager ktamv]]
-type: git_repo
-path: ~/kTAMV
-origin: https://github.com/TypQxQ/kTAMV.git
-primary_branch: main
-install_script: install.sh
-managed_services: klipper

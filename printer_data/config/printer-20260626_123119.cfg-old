@@ -510,13 +510,3 @@ gcode:
 #*# zy_compensations = -0.030220, -0.018924, 0.030226, 0.001467, 0.017450
 #*# compensation_start_y = 42.0
 #*# compensation_end_y = 272.0
-
-
-[ktamv]
-nozzle_cam_url: http://localhost/webcam/snapshot?max_delay=0
-server_url: http://localhost:8085
-move_speed: 1800
-send_frame_to_cloud: true
-detection_tolerance: 0
-
-[include ktamv-macros.cfg]
